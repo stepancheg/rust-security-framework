@@ -9,6 +9,7 @@ use std::ptr;
 use crate::base::Result;
 use crate::certificate::SecCertificate;
 use crate::cvt;
+use crate::import_export::Pkcs12ImportOptions;
 use crate::key::SecKey;
 
 declare_TCFType! {
@@ -36,6 +37,21 @@ impl fmt::Debug for SecIdentity {
 }
 
 impl SecIdentity {
+    /// Imports identities from PKCS #12 file.
+    ///
+    /// All other data from that file is discarded.
+    ///
+    /// This is a simple shortcut for the most common operation.
+    pub fn from_pkcs12(pkcs12_der: &[u8], password: &str) -> Result<Vec<SecIdentity>> {
+        let imported_identities = Pkcs12ImportOptions::new()
+            .passphrase(password)
+            .import(pkcs12_der)?;
+        Ok(imported_identities
+            .into_iter()
+            .flat_map(|identity| identity.identity)
+            .collect())
+    }
+
     /// Returns the certificate corresponding to this identity.
     pub fn certificate(&self) -> Result<SecCertificate> {
         unsafe {
@@ -63,5 +79,12 @@ mod test {
     fn identity_has_send_bound() {
         fn assert_send<T: Send>() {}
         assert_send::<SecIdentity>();
+    }
+
+    #[test]
+    fn sec_identity_from_pkcs12() {
+        let pkcs12_der = include_bytes!("../test/server.p12");
+        let identities = SecIdentity::from_pkcs12(pkcs12_der, "password123").unwrap();
+        assert_eq!(1, identities.len());
     }
 }
