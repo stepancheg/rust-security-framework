@@ -219,6 +219,7 @@ mod test {
     use crate::os::macos::test::identity;
     use crate::secure_transport::*;
     use crate::test::certificate;
+    use security_framework_sys::base::errSecNotTrusted;
 
     #[test]
     fn server_client() {
@@ -318,9 +319,16 @@ mod test {
         });
 
         let stream = p!(TcpStream::connect(("localhost", port)));
-        assert!(ClientBuilder::new()
-            .handshake("foobar.com", stream)
-            .is_err());
+        let handshake_result = ClientBuilder::new()
+            .handshake_new("foobar.com", stream);
+        match handshake_result {
+            Ok(..) => {}
+            Err(ClientHandshakeErrorNew::Failure(e)) => {
+                assert_eq!(errSecNotTrusted, e.code());
+                assert_eq!("“foobar.com” certificate is not trusted", e.description());
+            },
+            Err(ClientHandshakeErrorNew::Interrupted(s)) => panic!("wrong error: {:?}", s),
+        }
 
         handle.join().unwrap();
     }

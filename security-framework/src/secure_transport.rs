@@ -100,12 +100,12 @@ use std::ptr;
 use std::result;
 use std::slice;
 
-use crate::base::{Error, Result};
+use crate::base::{Error, Result, ErrorNew};
 use crate::certificate::SecCertificate;
 use crate::cipher_suite::CipherSuite;
 use crate::identity::SecIdentity;
 use crate::policy::SecPolicy;
-use crate::trust::{SecTrust, TrustResult};
+use crate::trust::SecTrust;
 use crate::{cvt, AsInner};
 use crate::import_export::Pkcs12ImportOptions;
 use security_framework_sys::base::errSecParam;
@@ -158,9 +158,54 @@ pub enum ClientHandshakeError<S> {
     Interrupted(MidHandshakeClientBuilder<S>),
 }
 
+impl<S> From<ClientHandshakeErrorNew<S>> for ClientHandshakeError<S> {
+    fn from(error: ClientHandshakeErrorNew<S>) -> Self {
+        match error {
+            ClientHandshakeErrorNew::Failure(e) => ClientHandshakeError::Failure(e.into()),
+            ClientHandshakeErrorNew::Interrupted(s) => ClientHandshakeError::Interrupted(s),
+        }
+    }
+}
+
 impl<S> From<Error> for ClientHandshakeError<S> {
     fn from(err: Error) -> Self {
         Self::Failure(err)
+    }
+}
+
+impl<S> From<ErrorNew> for ClientHandshakeError<S> {
+    fn from(err: ErrorNew) -> Self {
+        Self::Failure(err.into())
+    }
+}
+
+/// An error or intermediate state after a TLS handshake attempt.
+#[derive(Debug)]
+pub enum ClientHandshakeErrorNew<S> {
+    /// The handshake failed.
+    Failure(ErrorNew),
+    /// The handshake was interrupted midway through.
+    Interrupted(MidHandshakeClientBuilder<S>),
+}
+
+impl<S> From<Error> for ClientHandshakeErrorNew<S> {
+    fn from(error: Error) -> Self {
+        ClientHandshakeErrorNew::Failure(error.into())
+    }
+}
+
+impl<S> From<ErrorNew> for ClientHandshakeErrorNew<S> {
+    fn from(error: ErrorNew) -> Self {
+        ClientHandshakeErrorNew::Failure(error)
+    }
+}
+
+impl<S> From<ClientHandshakeError<S>> for ClientHandshakeErrorNew<S> {
+    fn from(error: ClientHandshakeError<S>) -> Self {
+        match error {
+            ClientHandshakeError::Failure(e) => ClientHandshakeErrorNew::Failure(e.into()),
+            ClientHandshakeError::Interrupted(s) => ClientHandshakeErrorNew::Interrupted(s),
+        }
     }
 }
 
@@ -169,9 +214,18 @@ impl<S> From<Error> for ClientHandshakeError<S> {
 pub struct MidHandshakeSslStream<S> {
     stream: SslStream<S>,
     error: Error,
+    error_new: Option<ErrorNew>,
 }
 
 impl<S> MidHandshakeSslStream<S> {
+    fn new(stream: SslStream<S>, os_status: OSStatus) -> MidHandshakeSslStream<S> {
+        MidHandshakeSslStream {
+            stream,
+            error: Error::from_code(os_status),
+            error_new: if os_status == errSecSuccess { None } else { Some(ErrorNew::from_os_status(os_status)) }
+        }
+    }
+
     /// Returns a shared reference to the inner stream.
     pub fn get_ref(&self) -> &S {
         self.stream.get_ref()
@@ -249,6 +303,11 @@ impl<S> MidHandshakeClientBuilder<S> {
 
     /// Restarts the handshake process.
     pub fn handshake(self) -> result::Result<SslStream<S>, ClientHandshakeError<S>> {
+        Ok(self.handshake_new()?)
+    }
+
+    /// Restarts the handshake process.
+    pub fn handshake_new(self) -> result::Result<SslStream<S>, ClientHandshakeErrorNew<S>> {
         let MidHandshakeClientBuilder {
             stream,
             domain,
@@ -263,7 +322,7 @@ impl<S> MidHandshakeClientBuilder<S> {
                 Ok(stream) => return Ok(stream),
                 Err(HandshakeError::Interrupted(stream)) => stream,
                 Err(HandshakeError::Failure(err)) => {
-                    return Err(ClientHandshakeError::Failure(err))
+                    return Err(ClientHandshakeErrorNew::Failure(err.into()))
                 }
             };
 
@@ -275,7 +334,7 @@ impl<S> MidHandshakeClientBuilder<S> {
                     trust_certs_only,
                     danger_accept_invalid_certs,
                 };
-                return Err(ClientHandshakeError::Interrupted(ret));
+                return Err(ClientHandshakeErrorNew::Interrupted(ret));
             }
 
             if stream.server_auth_completed() {
@@ -295,29 +354,11 @@ impl<S> MidHandshakeClientBuilder<S> {
                 let policy =
                     SecPolicy::create_ssl(SslProtocolSide::SERVER, domain.as_ref().map(|s| &**s));
                 trust.set_policy(&policy)?;
-                let trusted = trust.evaluate()?;
-                match trusted {
-                    TrustResult::PROCEED | TrustResult::UNSPECIFIED => {
-                        result = stream.handshake();
-                        continue;
-                    }
-                    TrustResult::DENY => {
-                        let err = Error::from_code(errSecTrustSettingDeny);
-                        return Err(ClientHandshakeError::Failure(err));
-                    }
-                    TrustResult::RECOVERABLE_TRUST_FAILURE | TrustResult::FATAL_TRUST_FAILURE => {
-                        let err = Error::from_code(errSecNotTrusted);
-                        return Err(ClientHandshakeError::Failure(err));
-                    }
-                    TrustResult::INVALID | TrustResult::OTHER_ERROR | _ => {
-                        let err = Error::from_code(errSecBadReq);
-                        return Err(ClientHandshakeError::Failure(err));
-                    }
-                }
+                trust.evaluate_new()?;
             }
 
             let err = Error::from_code(stream.error().code());
-            return Err(ClientHandshakeError::Failure(err));
+            return Err(ClientHandshakeErrorNew::Failure(err.into()));
         }
     }
 }
@@ -1000,10 +1041,10 @@ impl<S> SslStream<S> {
             | reason @ errSSLClientCertRequested
             | reason @ errSSLWouldBlock
             | reason @ errSSLClientHelloReceived => {
-                Err(HandshakeError::Interrupted(MidHandshakeSslStream {
-                    stream: self,
-                    error: Error::from_code(reason),
-                }))
+                Err(HandshakeError::Interrupted(MidHandshakeSslStream::new(
+                    self,
+                    reason,
+                )))
             }
             err => {
                 self.check_panic();
@@ -1306,12 +1347,26 @@ impl ClientBuilder {
     where
         S: Read + Write,
     {
+        Ok(self.handshake_new(domain, stream)?)
+    }
+
+    /// Initiates a new SSL/TLS session over a stream connected to the specified domain.
+    ///
+    /// If both SNI and hostname verification are disabled, the value of `domain` will be ignored.
+    pub fn handshake_new<S>(
+        &self,
+        domain: &str,
+        stream: S,
+    ) -> result::Result<SslStream<S>, ClientHandshakeErrorNew<S>>
+    where
+        S: Read + Write,
+    {
         // the logic for trust validation is in MidHandshakeClientBuilder::connect, so run all
         // of the handshake logic through that.
-        let stream = MidHandshakeSslStream {
-            stream: self.ctx_into_stream(domain, stream)?,
-            error: Error::from(errSecSuccess),
-        };
+        let stream = MidHandshakeSslStream::new(
+            self.ctx_into_stream(domain, stream)?,
+            errSecSuccess,
+        );
 
         let certs = self.certs.clone();
         let stream = MidHandshakeClientBuilder {
@@ -1325,7 +1380,7 @@ impl ClientBuilder {
             trust_certs_only: self.trust_certs_only,
             danger_accept_invalid_certs: self.danger_accept_invalid_certs,
         };
-        stream.handshake()
+        stream.handshake_new()
     }
 
     fn ctx_into_stream<S>(&self, domain: &str, stream: S) -> Result<SslStream<S>>
@@ -1506,12 +1561,12 @@ mod test {
             let stream = p!(TcpStream::connect("google.com:443"));
 
             // Manually handshake here.
-            let stream = MidHandshakeSslStream {
-                stream: ClientBuilder::new()
+            let stream = MidHandshakeSslStream::new(
+                ClientBuilder::new()
                     .ctx_into_stream("google.com", stream)
                     .unwrap(),
-                error: Error::from(errSecSuccess),
-            };
+                errSecSuccess,
+            );
 
             let mut result = stream.handshake();
 
@@ -1537,10 +1592,10 @@ mod test {
             builder.enable_session_tickets(true);
 
             // Manually handshake here.
-            let stream = MidHandshakeSslStream {
-                stream: builder.ctx_into_stream("google.com", stream).unwrap(),
-                error: Error::from(errSecSuccess),
-            };
+            let stream = MidHandshakeSslStream::new(
+                builder.ctx_into_stream("google.com", stream).unwrap(),
+                errSecSuccess,
+            );
 
             let mut result = stream.handshake();
 

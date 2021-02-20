@@ -5,9 +5,12 @@ use core_foundation_sys::base::OSStatus;
 use std::error;
 use std::fmt;
 use std::result;
+use core_foundation::error::CFError;
 
 /// A `Result` type commonly returned by functions.
 pub type Result<T> = result::Result<T, Error>;
+/// A `Result` type commonly returned by functions.
+pub type ResultNew<T> = result::Result<T, ErrorNew>;
 
 /// A Security Framework error.
 #[derive(Copy, Clone)]
@@ -68,6 +71,12 @@ impl From<OSStatus> for Error {
     }
 }
 
+impl From<ErrorNew> for Error {
+    fn from(error: ErrorNew) -> Self {
+        Error::from(error.code())
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(message) = self.message() {
@@ -81,5 +90,44 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn description(&self) -> &str {
         "Security Framework error"
+    }
+}
+
+#[derive(Debug)]
+enum ErrorNewImpl {
+    CFError(CFError),
+    OSStatus(OSStatus),
+}
+
+#[derive(Debug)]
+pub struct ErrorNew(ErrorNewImpl);
+
+impl ErrorNew {
+    pub fn from_cf_error(cf_error: CFError) -> ErrorNew {
+        ErrorNew(ErrorNewImpl::CFError(cf_error))
+    }
+
+    pub fn from_os_status(os_status: OSStatus) -> ErrorNew {
+        ErrorNew(ErrorNewImpl::OSStatus(os_status))
+    }
+
+    pub fn code(&self) -> OSStatus {
+        match &self.0 {
+            ErrorNewImpl::CFError(cf_error) => cf_error.code() as OSStatus,
+            ErrorNewImpl::OSStatus(os_status) => *os_status,
+        }
+    }
+
+    pub fn description(&self) -> String {
+        match &self.0 {
+            ErrorNewImpl::CFError(cf_error) => cf_error.description().to_string(),
+            ErrorNewImpl::OSStatus(os_error) => Error::from_code(*os_error).message().unwrap_or_else(|| format!("{}", os_error))
+        }
+    }
+}
+
+impl From<Error> for ErrorNew {
+    fn from(error: Error) -> ErrorNew {
+        ErrorNew::from_os_status(error.code())
     }
 }

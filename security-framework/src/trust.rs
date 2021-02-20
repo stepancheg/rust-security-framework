@@ -7,11 +7,12 @@ use core_foundation_sys::base::{Boolean, CFIndex};
 use security_framework_sys::trust::*;
 use std::ptr;
 
-use crate::base::Result;
+use crate::base::{Result, ResultNew, ErrorNew};
 use crate::certificate::SecCertificate;
 use crate::cvt;
 use crate::key::SecKey;
 use crate::policy::SecPolicy;
+use core_foundation::error::{CFErrorRef, CFError};
 
 /// The result of trust evaluation.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -120,6 +121,19 @@ impl SecTrust {
             let mut result = kSecTrustResultInvalid;
             cvt(SecTrustEvaluate(self.0, &mut result))?;
             Ok(TrustResult(result))
+        }
+    }
+
+    /// Evaluates trust.
+    pub fn evaluate_new(&self) -> ResultNew<()> {
+        unsafe {
+            let mut error: CFErrorRef = ::std::ptr::null_mut();
+            if !SecTrustEvaluateWithError(self.0, &mut error) {
+                assert!(!error.is_null());
+                let error = CFError::wrap_under_create_rule(error);
+                return Err(ErrorNew::from_cf_error(error));
+            }
+            Ok(())
         }
     }
 
